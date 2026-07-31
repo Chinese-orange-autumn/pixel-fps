@@ -383,7 +383,7 @@ function suggestFix() {
     if (location.protocol === 'file:') {
       tip = '当前通过 file:// 打开，WebRTC 在该协议下受限。<br>请在游戏文件夹里运行 <code>python3 -m http.server 8000</code>，然后浏览器访问 http://localhost:8000/fps.html';
     } else {
-      tip = '信令正常但连接仍未建立——可能是双方网络严格限制 WebRTC。<br>建议：① 双方连同一 Wi-Fi 局域网；② 关闭企业 VPN/防火墙重试；③ 尝试更换手机热点。<br><span style="color:#ffd966">注：当前已启用 PeerJS 云 TURN 中继，若仍失败通常是双方都在对称 NAT 后面。</span>';
+      tip = '信令正常但连接仍未建立。<br>当前已强制使用 TURN 中继模式（端口 443 伪装 HTTPS），若仍失败建议：<br>① 双方连同一 Wi-Fi 局域网；② 关闭企业 VPN/防火墙重试；③ 换手机热点试试。<br><span style="color:#ffd966">若以上均无效，可能是双方均在对称 NAT 后且 TURN 服务器也被拦截。</span>';
     }
     return tip;
   }
@@ -416,15 +416,31 @@ function genRoomId() {
 }
 
 // ============== PeerJS ==============
-// 关键：不要自定义 iceServers，让 PeerJS 云信令自动注入其内置的 TURN 中继服务器
-// （0.peerjs.com 的 TURN 是跨网联机的核心保障，自定义 iceServers 会覆盖它）
-// 如需额外 STUN/TURN，直接在 PeerJS 默认基础上追加即可
+// 关键：国内网络下 PeerJS 云默认 TURN 服务器可能被 GFW 拦截
+// 策略：强制 TURN 中继模式（iceTransportPolicy: relay），用端口 443 TCP 伪装 HTTPS 绕过防火墙
+// 多个 TURN 服务器互为备份
 const PEER_OPTIONS = {
   host: '0.peerjs.com',
   port: 443,
   path: '/',
   secure: true,
   debug: 1,
+  config: {
+    // 'all' = 先试 STUN（直连，快），再试 TURN（中继，穿防火墙）
+    // TURN 服务器排前，优先走中继绕过 GFW
+    iceTransportPolicy: 'all',
+    iceServers: [
+      // 443 端口 + TCP：伪装 HTTPS，最难被 GFW/企业防火墙拦截
+      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+      // 80 端口 + TCP：伪装 HTTP，次选
+      { urls: 'turn:openrelay.metered.ca:80?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+      // STUN：同局域网时直连最快
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+    ]
+  }
 };
 function ensurePeer(idHint) {
   return new Promise((resolve, reject) => {
@@ -434,15 +450,18 @@ function ensurePeer(idHint) {
     p.on('open', id => {
       resolved = true;
       diag.peerOpen = true; diag.peerOpenAt = performance.now();
+      console.log('[PeerJS] 信令连接成功, peerId:', id);
       resolve(p);
     });
     p.on('error', err => {
+      console.error('[PeerJS] error:', err.type, err);
       diag.peerErr = err;
       if (!resolved) reject(err);
       else handlePeerError(err);
     });
-    p.on('disconnected', () => { try { p.reconnect(); } catch (e) {} });
+    p.on('disconnected', () => { console.warn('[PeerJS] disconnected'); try { p.reconnect(); } catch (e) {} });
     p.on('connection', c => {
+      console.log('[PeerJS] 收到入站连接, remotePeerId:', c.peer);
       if (conn && conn.open) { c.close(); return; }
       conn = c; setupConn();
     });
@@ -508,11 +527,16 @@ async function joinRoom() {
   conn = peer.connect(code);
   conn.on('open', () => {
     diag.connOpen = true; diag.connOpenAt = performance.now();
+    console.log('[PeerJS] P2P 连接成功, remotePeerId:', conn.peer, 'latency:', (Date.now() - performance.now()).toFixed(0) + 'ms');
     setupConn(); showGameArea();
   });
   conn.on('error', (e) => {
+    console.error('[PeerJS] 连接错误:', e);
     diag.connErr = e || {};
     if (!connected) showDiagnosis();
+  });
+  conn.on('iceStateChanged', (state) => {
+    console.log('[PeerJS] ICE 状态:', state);
   });
   // 超时诊断：TURN 中继连接比直连慢，给足时间
   joinTimeout = setTimeout(() => {
@@ -520,7 +544,7 @@ async function joinRoom() {
       if (conn) try { conn.close(); } catch (e) {}
       showDiagnosis();
     }
-  }, 15000);
+  }, 20000);
 }
 
 function setupConn() {
