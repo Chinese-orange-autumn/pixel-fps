@@ -361,7 +361,7 @@ function peerErrHint(type) {
     case 'peer-unavailable': return '目标房间不存在或对方已离线';
     case 'disconnected': return '与信令服务器断开，正在重连';
     case 'ice-failed':
-      return 'NAT/防火墙穿透失败，建议改用 TURN 中继或在同一局域网';
+      return 'NAT/防火墙穿透失败。PeerJS 云 TURN 中继已启用，若仍失败请尝试换网络或同局域网';
     default: return type;
   }
 }
@@ -383,7 +383,7 @@ function suggestFix() {
     if (location.protocol === 'file:') {
       tip = '当前通过 file:// 打开，WebRTC 在该协议下受限。<br>请在游戏文件夹里运行 <code>python3 -m http.server 8000</code>，然后浏览器访问 http://localhost:8000/fps.html';
     } else {
-      tip = '信令正常但 P2P 直连失败——多由 NAT/防火墙拦截 WebRTC(UDP) 打洞引起。<br>建议：① 双方连同一 Wi-Fi 局域网；② 代码中配置公共 TURN 中继服务器；③ 关闭企业 VPN/防火墙重试。';
+      tip = '信令正常但连接仍未建立——可能是双方网络严格限制 WebRTC。<br>建议：① 双方连同一 Wi-Fi 局域网；② 关闭企业 VPN/防火墙重试；③ 尝试更换手机热点。<br><span style="color:#ffd966">注：当前已启用 PeerJS 云 TURN 中继，若仍失败通常是双方都在对称 NAT 后面。</span>';
     }
     return tip;
   }
@@ -416,27 +416,15 @@ function genRoomId() {
 }
 
 // ============== PeerJS ==============
-// PeerJS 配置：官方免费云信令服务器 + 多 STUN/TURN 提升跨网 NAT 穿透成功率
+// 关键：不要自定义 iceServers，让 PeerJS 云信令自动注入其内置的 TURN 中继服务器
+// （0.peerjs.com 的 TURN 是跨网联机的核心保障，自定义 iceServers 会覆盖它）
+// 如需额外 STUN/TURN，直接在 PeerJS 默认基础上追加即可
 const PEER_OPTIONS = {
-  // 官方免费 PeerJS 云信令服务器（默认即此，显式声明便于切换自建）
   host: '0.peerjs.com',
   port: 443,
   path: '/',
   secure: true,
   debug: 1,
-  config: {
-    iceServers: [
-      // Google 公共 STUN（主力，覆盖大多数 NAT）
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
-      { urls: 'stun:stun3.l.google.com:19302' },
-      // OpenRelay 免费 TURN 中继（兜底，应对对称 NAT / 企业防火墙；走 80/443 端口绕过端口限制）
-      { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-    ]
-  }
 };
 function ensurePeer(idHint) {
   return new Promise((resolve, reject) => {
@@ -503,7 +491,7 @@ async function createRoom() {
       const cb = document.getElementById('cancelWaitBtn');
       if (cb) cb.onclick = leaveRoom;
     }
-  }, 20000);
+  }, 30000);
 }
 
 async function joinRoom() {
@@ -526,13 +514,13 @@ async function joinRoom() {
     diag.connErr = e || {};
     if (!connected) showDiagnosis();
   });
-  // 超时诊断：信令通但 P2P 未建立时给出 NAT/防火墙建议
+  // 超时诊断：TURN 中继连接比直连慢，给足时间
   joinTimeout = setTimeout(() => {
     if (!connected) {
       if (conn) try { conn.close(); } catch (e) {}
       showDiagnosis();
     }
-  }, 8000);
+  }, 15000);
 }
 
 function setupConn() {
